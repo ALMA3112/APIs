@@ -1,13 +1,16 @@
-import math
 import re
-from typing import List, Union, Dict, Any, Optional
+import math
+from typing import Any, List
 
 import spacy
 from spacy import displacy
-from fastapi import FastAPI, HTTPException, Request, status
+
+from fastapi import FastAPI, Request, HTTPException, status
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+
 from pydantic import BaseModel, field_validator
+
 from mangum import Mangum
 
 # ------------------------------------------------------------------------------
@@ -20,8 +23,8 @@ except Exception as e:
 
 app = FastAPI(
     title="Dashboard API NLP",
-    version="1.0.0",
-    description="API de NLP con interfaz gráfica e interoperabilidad 100% ajustada a la guía"
+    version="1.0.1",
+    description="API de NLP con interfaz gráfica e interoperabilidad ajustada a la guía"
 )
 
 # Middleware para interceptar solicitudes con Content-Type inválido en Lambda/EC2
@@ -37,14 +40,20 @@ async def validate_content_type_middleware(request: Request, call_next):
     return await call_next(request)
 
 # ------------------------------------------------------------------------------
-# 2. Manejo Global de Errores para Garantizar HTTP 400
+# 2. Manejo Global de Errores para Garantizar HTTP 400 / 500 controlados
 # ------------------------------------------------------------------------------
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        content={"detail": "Entrada inválida o formato incorrecto."}
-    )
+    # FIX: se extrae el mensaje real del validador en vez de un texto genérico fijo.
+    # Los validadores ahora lanzan ValueError (patrón idiomático de Pydantic v2),
+    # que FastAPI envuelve automáticamente en RequestValidationError.
+    errors = exc.errors()
+    detail = "Entrada inválida o formato incorrecto."
+    if errors:
+        msg = errors[0].get("msg", detail)
+        # Pydantic v2 antepone "Value error, " a los mensajes lanzados con ValueError
+        detail = msg.replace("Value error, ", "")
+    return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": detail})
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -53,42 +62,57 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         content={"detail": exc.detail}
     )
 
+# FIX: handler genérico para cualquier excepción no controlada (p. ej. errores internos
+# de spaCy con entradas extremas). Evita que Lambda/uvicorn devuelvan un traceback crudo
+# y garantiza siempre una respuesta JSON, aunque el código de estado siga siendo 5xx.
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Error interno del servidor."}
+    )
+
 # ------------------------------------------------------------------------------
 # 3. Modelos de Datos (Pydantic) y Validadores Strict
 # ------------------------------------------------------------------------------
+# FIX: los validadores ahora lanzan ValueError en lugar de HTTPException.
+# Es el patrón soportado oficialmente por Pydantic v2 dentro de field_validator;
+# HTTPException lanzada ahí dependía de que Starlette la interceptara "por fuera"
+# del ciclo de validación, lo cual no está garantizado entre versiones.
 def validate_single_text_str(v: Any) -> str:
     if v is None or not isinstance(v, str):
-        raise HTTPException(status_code=400, detail="El texto debe ser una cadena de caracteres.")
+        raise ValueError("El texto debe ser una cadena de caracteres.")
     if not v.strip():
-        raise HTTPException(status_code=400, detail="El texto no puede estar vacío ni contener solo espacios.")
+        raise ValueError("El texto no puede estar vacío ni contener solo espacios.")
     return v
 
 def validate_text_batch_input(v: Any) -> List[str]:
     if v is None:
-        raise HTTPException(status_code=400, detail="El campo 'text' no puede ser nulo.")
-    
+        raise ValueError("El campo 'text' no puede ser nulo.")
+
     if isinstance(v, str):
         if not v.strip():
-            raise HTTPException(status_code=400, detail="El texto no puede estar vacío ni contener solo espacios.")
+            raise ValueError("El texto no puede estar vacío ni contener solo espacios.")
         return [v]
     elif isinstance(v, list):
         if len(v) == 0:
-            raise HTTPException(status_code=400, detail="La lista de textos no puede estar vacía.")
+            raise ValueError("La lista de textos no puede estar vacía.")
         texts = []
         for item in v:
             if item is None or not isinstance(item, str):
-                raise HTTPException(status_code=400, detail="Todos los elementos deben ser cadenas de texto.")
+                raise ValueError("Todos los elementos deben ser cadenas de texto.")
             if not item.strip():
-                raise HTTPException(status_code=400, detail="Ningún texto puede estar vacío o contener solo espacios.")
+                raise ValueError("Ningún texto puede estar vacío o contener solo espacios.")
             texts.append(item)
         return texts
     else:
-        raise HTTPException(status_code=400, detail="El campo 'text' debe ser string o una lista de strings.")
+        raise ValueError("El campo 'text' debe ser string o una lista de strings.")
 
 class BatchTextRequest(BaseModel):
     text: Any
 
     @field_validator("text")
+    @classmethod
     def check_text(cls, v):
         return validate_text_batch_input(v)
 
@@ -96,26 +120,28 @@ class VisualizeDepRequest(BaseModel):
     text: Any
 
     @field_validator("text")
+    @classmethod
     def check_single_text(cls, v):
         if isinstance(v, list):
-            raise HTTPException(status_code=400, detail="visualize/dep solo procesa un único documento, no un lote.")
+            raise ValueError("visualize/dep solo procesa un único documento, no un lote.")
         return validate_single_text_str(v)
 
 class VectorizeRequest(BaseModel):
     documents: Any
 
     @field_validator("documents")
+    @classmethod
     def check_documents(cls, v):
         if v is None or not isinstance(v, list):
-            raise HTTPException(status_code=400, detail="'documents' debe ser una lista de cadenas de texto.")
+            raise ValueError("'documents' debe ser una lista de cadenas de texto.")
         if len(v) < 2:
-            raise HTTPException(status_code=400, detail="Se requieren al menos 2 documentos para vectorizar.")
-        
+            raise ValueError("Se requieren al menos 2 documentos para vectorizar.")
+
         for doc in v:
             if doc is None or not isinstance(doc, str):
-                raise HTTPException(status_code=400, detail="Todos los documentos deben ser cadenas de texto.")
+                raise ValueError("Todos los documentos deben ser cadenas de texto.")
             if not doc.strip():
-                raise HTTPException(status_code=400, detail="Los documentos no pueden estar vacíos ni contener solo espacios.")
+                raise ValueError("Los documentos no pueden estar vacíos ni contener solo espacios.")
         return v
 
 # ------------------------------------------------------------------------------
@@ -239,6 +265,11 @@ def read_root():
 # Endpoint 1: Limpieza de texto (/api/v1/clean)
 @app.post("/api/v1/clean")
 def clean_text_endpoint(payload: BatchTextRequest):
+    # FIX: el validador de BatchTextRequest siempre normaliza `text` a List[str],
+    # sin importar si llegó string o lista. Por lo tanto `payload.text` NUNCA es un
+    # string en este punto; se elimina la rama muerta que comprobaba
+    # `isinstance(payload.text, str)` y se retorna siempre una lista, tal como
+    # exige el contrato ("cleaned_text: lista de strings, incluso para entrada individual").
     texts: List[str] = payload.text
     cleaned_list = [clean_single_text(t) for t in texts]
     return {"cleaned_text": cleaned_list}
@@ -248,7 +279,7 @@ def clean_text_endpoint(payload: BatchTextRequest):
 def pos_endpoint(payload: BatchTextRequest):
     texts: List[str] = payload.text
     results = []
-    
+
     for doc_nlp in nlp.pipe(texts):
         doc_tokens = []
         for token in doc_nlp:
@@ -257,8 +288,13 @@ def pos_endpoint(payload: BatchTextRequest):
                 "pos": token.pos_,
                 "lemma": token.lemma_
             })
-        results.append(doc_tokens)
-        
+        # FIX: el contrato exige results[i].tokens (objeto con clave "tokens"),
+        # no la lista de tokens directamente. Antes se hacía
+        # results.append(doc_tokens), lo cual dejaba results[i] como una lista
+        # cruda sin la clave "tokens" -> el validador del contrato nunca la
+        # encontraba y todo el endpoint se reportaba como fallido.
+        results.append({"tokens": doc_tokens})
+
     return {"results": results}
 
 # Endpoint 3: Reconocimiento de Entidades Nombradas (/api/v1/ner)
@@ -266,7 +302,7 @@ def pos_endpoint(payload: BatchTextRequest):
 def ner_endpoint(payload: BatchTextRequest):
     texts: List[str] = payload.text
     results = []
-    
+
     for doc_nlp in nlp.pipe(texts):
         doc_entities = []
         for ent in doc_nlp.ents:
@@ -276,8 +312,11 @@ def ner_endpoint(payload: BatchTextRequest):
                 "start": ent.start_char,
                 "end": ent.end_char
             })
-        results.append(doc_entities)
-        
+        # FIX: mismo problema que en /api/v1/pos. El contrato exige
+        # results[i].entities (objeto con clave "entities"), no la lista de
+        # entidades directamente.
+        results.append({"entities": doc_entities})
+
     return {"results": results}
 
 # Endpoint 4: Visualización de Dependencias (/api/v1/visualize/dep)
@@ -286,7 +325,7 @@ def visualize_dep_endpoint(payload: VisualizeDepRequest):
     text: str = payload.text
     doc = nlp(text)
     svg_content = displacy.render(doc, style="dep", jupyter=False)
-    
+
     full_html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -305,15 +344,15 @@ def visualize_dep_endpoint(payload: VisualizeDepRequest):
 @app.post("/api/v1/vectorize")
 def vectorize_endpoint(payload: VectorizeRequest):
     documents: List[str] = payload.documents
-    
+
     docs_tokens = [clean_single_text_tokens(doc) for doc in documents]
-    
+
     vocab_set = set()
     for tokens in docs_tokens:
         for t in tokens:
             vocab_set.add(t)
-            
-    vocabulary = sorted(list(vocab_set))
+
+    vocabulary = sorted(vocab_set)
     vocab_map = {word: idx for idx, word in enumerate(vocabulary)}
     V = len(vocabulary)
     N = len(documents)
@@ -336,14 +375,13 @@ def vectorize_endpoint(payload: VectorizeRequest):
                 doc_matrix.append(vec)
         one_hot.append(doc_matrix)
 
-    tf_idf = []
     idf_values = []
-    
-    for idx, term in enumerate(vocabulary):
+    for term in vocabulary:
         n_t = sum(1 for tokens in docs_tokens if term in tokens)
         idf_t = math.log((N + 1.0) / (n_t + 1.0)) + 1.0
         idf_values.append(idf_t)
 
+    tf_idf = []
     for i in range(N):
         row = []
         for j in range(V):
