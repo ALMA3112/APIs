@@ -1,56 +1,146 @@
-# NLP Processing Microservice API (FastAPI + AWS)
+# Microservicio de Procesamiento de Lenguaje Natural (spaCy + AWS)
 
-Microservicio de Procesamiento de Lenguaje Natural (NLP) de alto rendimiento construido con **FastAPI**, **spaCy** y **scikit-learn**. Desplegado de forma paralela en la nube utilizando arquitectura con servidor (**AWS EC2**) y arquitectura Serverless (**AWS Lambda**).
+Laboratorio I — Procesamiento de Lenguaje Natural — 2026 S02
+Universidad Sergio Arboleda
 
----
+Microservicio NLP construido con **FastAPI** y **spaCy** (`es_core_news_sm`), desplegado en dos
+arquitecturas dentro de AWS Academy con el mismo comportamiento funcional en ambas:
 
-## Arquitectura y Despliegue
+- **Despliegue persistente (EC2 / Cloud9)**: proceso `uvicorn` corriendo directamente sobre la instancia.
+- **Despliegue serverless (Lambda)**: imagen de contenedor en ECR, ejecutada vía **Lambda Function URL**,
+  usando `Mangum` como adaptador ASGI.
 
-La solución cuenta con paridad de entorno y persistencia en dos infraestructuras distintas de AWS:
+## URLs públicas
 
-| Entorno | Tipo | URL Base |
-| :--- | :--- | :--- |
-| **AWS EC2** | Servidor persistente (Port 8000) | `http://54.204.206.244:8000` |
-| **AWS Lambda** | Serverless / Function URL | `https://uwsq72qscaqkmjsljbpqfxab7a0xwkkr.lambda-url.us-east-1.on.aws` |
+| Entorno | URL |
+|---|---|
+| EC2 | `http://54.221.55.237:8080` |
+| Lambda (Function URL) | `https://umjdv3obh23eceyk7dxco6rufq0zwgux.lambda-url.us-east-1.on.aws` |
 
----
+## Estructura del repositorio
 
-## Endpoints Disponibles
+```
+.
+├── common/
+│   └── main.py              # Lógica funcional del microservicio (FastAPI), común a ambas arquitecturas
+├── ec2/
+│   └── (config/servicio systemd o instrucciones de arranque específicas de EC2)
+├── lambda/
+│   ├── Dockerfile            # Imagen de contenedor para Lambda
+│   └── requirements.txt      # Dependencias específicas de la imagen Lambda
+├── tests/
+│   └── test_4_niveles.py     # Suite de pruebas de caja negra (fácil/medio/difícil/imposible)
+└── README.md
+```
 
-### 1. Limpieza de Texto (`/api/v1/clean`)
-Normaliza y remueve ruido del texto (símbolos, URLs, formato).
-* **Método:** `POST`
-* **Payload:** `{"text": "Texto a limpiar..."}` o `{"text": ["Texto 1", "Texto 2"]}`
+> La lógica funcional (`main.py`) es la **misma** para ambos despliegues; solo cambian los archivos de
+> empaquetado/arranque propios de cada arquitectura (`ec2/` vs `lambda/`), tal como exige la guía.
 
-### 2. Etiquetado Gramatical (`/api/v1/pos`)
-Realiza extracción de Part-of-Speech Tagging utilizando modelos de spaCy.
-* **Método:** `POST`
-* **Payload:** `{"text": "El perro corre rápido."}`
+## Capacidades implementadas
 
-### 3. Reconocimiento de Entidades (`/api/v1/ner`)
-Identifica organizaciones, personas, lugares y fechas en el texto.
-* **Método:** `POST`
-* **Payload:** `{"text": "Carlos trabaja en Amazon en la ciudad de Seattle."}`
+| Capacidad | Endpoint | Método |
+|---|---|---|
+| Limpieza de texto | `/api/v1/clean` | POST |
+| Análisis POS | `/api/v1/pos` | POST |
+| Reconocimiento de entidades (NER) | `/api/v1/ner` | POST |
+| Visualización de dependencias | `/api/v1/visualize/dep` | POST |
+| Vectorización (One-Hot, BoW, TF-IDF) | `/api/v1/vectorize` | POST |
 
-### 4. Vectorización TF-IDF (`/api/v1/vectorize`)
-Calcula la matriz dispersa de representación numérica TF-IDF para lotes de documentos.
-* **Método:** `POST`
-* **Payload:** `{"documents": ["Documento uno", "Documento dos"]}`
+Todos los endpoints reciben `Content-Type: application/json` y devuelven `application/json`,
+excepto `/api/v1/visualize/dep`, que devuelve `text/html`.
 
-### 5. Visualización Sintáctica (`/api/v1/visualize/dep`)
-Genera la estructura en árbol de dependencias sintácticas.
-* **Método:** `POST`
-* **Payload:** `{"text": "FastAPI procesa la solicitud asíncrona."}`
+## Cómo ejecutar el proyecto
 
----
+### Requisitos previos
+- Python 3.12
+- pip
+- Docker (solo necesario para reconstruir/desplegar la imagen de Lambda)
+- Credenciales de AWS Academy configuradas (`aws configure` o variables de entorno) para el despliegue
 
-## Validación de Contrato y Manejo de Errores
+### Ejecución local (para desarrollo/pruebas)
 
-Las solicitudes que incumplan el contrato (ausencia de campos obligatorios, valores `null`, tipos incorrectos, listas vacías, elementos no string o textos vacíos) producen una respuesta controlada con código **HTTP 4xx**, rechazando el lote completo sin emitir resultados parciales
+```bash
+pip install fastapi uvicorn mangum spacy --break-system-packages
+python -m spacy download es_core_news_sm
+uvicorn main:app --host 0.0.0.0 --port 8080
+```
 
----
+El servicio queda disponible en `http://localhost:8080`, con la consola de pruebas interactiva en `/`.
 
-## Declaración de Uso de Inteligencia Artificial
+### Despliegue en EC2 (persistente)
 
-Durante el desarrollo de este laboratorio se emplearon herramientas de Inteligencia Artificial Generativa como asistencia para la estructuración del código base, la optimización de los algoritmos de vectorización matemática y la resolución de incidencias de despliegue en AWS
-* **Verificación:** Todo el código generado por IA fue rigurosamente auditado, probado y contrastado de manera manual contra las pruebas funcionales, de paridad, concurrencia y rendimiento establecidas en la guía oficial de la Universidad Sergio Arboleda
+1. Copiar `common/main.py` a la instancia EC2.
+2. Instalar dependencias (`pip install -r requirements.txt --break-system-packages` y
+   `python -m spacy download es_core_news_sm`).
+3. Levantar el servicio: `uvicorn main:app --host 0.0.0.0 --port 8080`
+   (en producción, ejecutarlo como servicio persistente, ej. con `systemd` o `nohup`).
+
+### Despliegue en Lambda (serverless, vía imagen de contenedor)
+
+```bash
+# Variables de la cuenta
+export AWS_REGION="us-east-1"
+export ACCOUNT_ID="<tu-account-id>"
+export REPO_NAME="nlp-fastapi"
+export FUNCTION_NAME="nlp-fastapi-image"
+export ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}"
+
+# Construir y subir la imagen
+cd lambda/
+docker build --platform linux/amd64 -t "${REPO_NAME}:latest" .
+aws ecr get-login-password --region "${AWS_REGION}" | \
+  docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+docker tag "${REPO_NAME}:latest" "${ECR_URI}:latest"
+docker push "${ECR_URI}:latest"
+
+# Crear/actualizar la función Lambda (tipo Imagen)
+aws lambda create-function \
+  --function-name "${FUNCTION_NAME}" \
+  --package-type Image \
+  --code ImageUri="${ECR_URI}:latest" \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/LabRole" \
+  --timeout 30 --memory-size 1024 --region "${AWS_REGION}"
+
+# Exponer públicamente vía Function URL
+aws lambda create-function-url-config --function-name "${FUNCTION_NAME}" \
+  --auth-type NONE --region "${AWS_REGION}"
+aws lambda add-permission --function-name "${FUNCTION_NAME}" \
+  --statement-id FunctionURLAllowPublicAccess --action lambda:InvokeFunctionUrl \
+  --principal "*" --function-url-auth-type NONE --region "${AWS_REGION}"
+```
+
+### Ejecutar las pruebas de caja negra
+
+```bash
+pip install requests --break-system-packages
+python3 tests/test_4_niveles.py
+```
+
+La suite valida, contra ambos despliegues simultáneamente: las 5 capacidades funcionales, las reglas de
+vectorización (incluida verificación matemática exacta de TF-IDF), los 24 casos de entrada inválida de la
+sección 9 del enunciado, capacidad (25 documentos de hasta 1000 caracteres en clean/pos/ner, 10 en
+vectorize), concurrencia (5 y 20 solicitudes simultáneas), consistencia, statelessness, y paridad
+funcional completa entre EC2 y Lambda.
+
+## Declaración de uso de inteligencia artificial generativa
+
+En cumplimiento de la sección 6 de la guía del laboratorio:
+
+- **Herramienta utilizada**: Claude (Anthropic).
+- **Propósito**: apoyo en la corrección y robustecimiento del código del microservicio (manejo de
+  errores de validación con Pydantic, patrón de excepciones para garantizar respuestas HTTP 4xx
+  controladas), diagnóstico y resolución de problemas de despliegue en AWS Academy (errores de memoria al
+  actualizar código Lambda, migración de despliegue .zip a imagen de contenedor por límite de tamaño de
+  paquete, renovación de credenciales temporales, configuración de Function URL), y diseño de una suite
+  de pruebas de caja negra para verificar el cumplimiento del contrato descrito en esta guía.
+- **Verificación de resultados**: todo el código generado o modificado con asistencia de IA fue revisado
+  manualmente y validado mediante ejecución real de pruebas de caja negra (`tests/test_4_niveles.py`)
+  contra ambos despliegues activos, incluyendo verificación matemática independiente de la fórmula TF-IDF
+  y comparación de paridad de resultados entre EC2 y Lambda. No se compartieron credenciales, claves de
+  acceso, tokens ni información sensible de AWS Academy con la herramienta de IA durante el proceso.
+
+## Notas de seguridad
+
+- No se incluyen credenciales, claves secretas ni tokens de sesión en este repositorio.
+- Las credenciales de AWS Academy Learner Lab son temporales y deben configurarse localmente por cada
+  integrante del equipo antes de ejecutar los comandos de despliegue.
